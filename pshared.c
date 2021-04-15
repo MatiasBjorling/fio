@@ -130,3 +130,23 @@ int rwlock_init_pshared(pthread_rwlock_t *rwlock)
 
 	return 0;
 }
+
+int spin_init_pshared(pthread_spinlock_t *lock)
+{
+	int ret;
+
+	/*
+	 * Not all platforms support process shared mutexes (NetBSD/OpenBSD)
+	 */
+#ifdef CONFIG_PSHARED
+	ret = pthread_spin_init(lock, PTHREAD_PROCESS_SHARED);
+#else
+	ret = pthread_spin_init(lock, 0);
+#endif
+	if (ret) {
+		log_err("pthread_spinlock_init: %s\n", strerror(ret));
+		return ret;
+	}
+
+	return 0;
+}
