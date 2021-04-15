@@ -98,3 +98,35 @@ int mutex_cond_init_pshared(pthread_mutex_t *mutex, pthread_cond_t *cond)
 
 	return 0;
 }
+
+int rwlock_init_pshared(pthread_rwlock_t *rwlock)
+{
+	pthread_rwlockattr_t rwattr;
+	int ret;
+
+	ret = pthread_rwlockattr_init(&rwattr);
+	if (ret) {
+		log_err("pthread_rwlockattr_init: %s\n", strerror(ret));
+		return ret;
+	}
+
+	/*
+	 * Not all platforms support process shared mutexes (NetBSD/OpenBSD)
+	 */
+#ifdef CONFIG_PSHARED
+	ret = pthread_rwlockattr_setpshared(&rwattr, PTHREAD_PROCESS_SHARED);
+	if (ret) {
+		log_err("pthread_rwlockattr_setpshared: %s\n", strerror(ret));
+		return ret;
+	}
+#endif
+	ret = pthread_rwlock_init(rwlock, &rwattr);
+	if (ret) {
+		log_err("pthread_rwlock_init: %s\n", strerror(ret));
+		return ret;
+	}
+
+	pthread_rwlockattr_destroy(&rwattr);
+
+	return 0;
+}

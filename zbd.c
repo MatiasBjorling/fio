@@ -155,7 +155,7 @@ static inline uint64_t zbd_zone_capacity_end(const struct fio_zone_info *z)
  * @z: zone info pointer.
  * @required: minimum number of bytes that must remain in a zone.
  *
- * The caller must hold z->mutex.
+ * The caller must hold z->rwlock with either read or write lock.
  */
 static bool zbd_zone_full(const struct fio_file *f, struct fio_zone_info *z,
 			  uint64_t required)
@@ -166,8 +166,7 @@ static bool zbd_zone_full(const struct fio_file *f, struct fio_zone_info *z,
 		z->wp + required > zbd_zone_capacity_end(z);
 }
 
-static void zone_lock(struct thread_data *td, const struct fio_file *f,
-		      struct fio_zone_info *z)
+static void zone_lock_checks(const struct fio_file *f, struct fio_zone_info *z)
 {
 	struct zoned_block_device_info *zbd = f->zbd_info;
 	uint32_t nz = z - zbd->zone_info;
@@ -176,6 +175,12 @@ static void zone_lock(struct thread_data *td, const struct fio_file *f,
 	assert(f->min_zone <= nz && nz < f->max_zone);
 
 	assert(z->has_wp);
+}
+
+static void zone_lock_wr(struct thread_data *td, const struct fio_file *f,
+			 struct fio_zone_info *z)
+{
+	zone_lock_checks(f, z);
 
 	/*
 	 * Lock the io_u target zone. The zone will be unlocked if io_u offset
@@ -186,10 +191,22 @@ static void zone_lock(struct thread_data *td, const struct fio_file *f,
 	 * process the currently queued I/Os so that I/O progress is made and
 	 * zones unlocked.
 	 */
-	if (pthread_mutex_trylock(&z->mutex) != 0) {
+	if (pthread_rwlock_trywrlock(&z->rwlock) != 0) {
 		if (!td_ioengine_flagged(td, FIO_SYNCIO))
 			io_u_quiesce(td);
-		pthread_mutex_lock(&z->mutex);
+		pthread_rwlock_wrlock(&z->rwlock);
+	}
+}
+
+static void zone_lock_rd(struct thread_data *td, const struct fio_file *f,
+			 struct fio_zone_info *z)
+{
+	zone_lock_checks(f, z);
+
+	if (pthread_rwlock_tryrdlock(&z->rwlock) != 0) {
+		if (!td_ioengine_flagged(td, FIO_SYNCIO))
+			io_u_quiesce(td);
+		pthread_rwlock_rdlock(&z->rwlock);
 	}
 }
 
@@ -198,7 +215,7 @@ static inline void zone_unlock(struct fio_zone_info *z)
 	int ret;
 
 	assert(z->has_wp);
-	ret = pthread_mutex_unlock(&z->mutex);
+	ret = pthread_rwlock_unlock(&z->rwlock);
 	assert(!ret);
 }
 
@@ -412,8 +429,7 @@ static int init_zone_info(struct thread_data *td, struct fio_file *f)
 	zbd_info->refcount = 1;
 	p = &zbd_info->zone_info[0];
 	for (i = 0; i < nr_zones; i++, p++) {
-		mutex_init_pshared_with_type(&p->mutex,
-					     PTHREAD_MUTEX_RECURSIVE);
+		rwlock_init_pshared(&p->rwlock);
 		p->start = i * zone_size;
 		p->wp = p->start;
 		p->type = ZBD_ZONE_TYPE_SWR;
@@ -488,8 +504,7 @@ static int parse_zone_info(struct thread_data *td, struct fio_file *f)
 	for (offset = 0, j = 0; j < nr_zones;) {
 		z = &zones[0];
 		for (i = 0; i < nrz; i++, j++, z++, p++) {
-			mutex_init_pshared_with_type(&p->mutex,
-						     PTHREAD_MUTEX_RECURSIVE);
+			rwlock_init_pshared(&p->rwlock);
 			p->start = z->start;
 			p->capacity = z->capacity;
 			switch (z->cond) {
@@ -773,7 +788,7 @@ static inline unsigned int zbd_zone_nr(const struct fio_file *f,
  *
  * Returns 0 upon success and a negative error code upon failure.
  *
- * The caller must hold z->mutex.
+ * The caller must hold z->rwlock with write lock.
  */
 static int zbd_reset_zone(struct thread_data *td, struct fio_file *f,
 			  struct fio_zone_info *z)
@@ -860,7 +875,7 @@ static int zbd_reset_zones(struct thread_data *td, struct fio_file *f,
 
 		if (!z->has_wp)
 			continue;
-		zone_lock(td, f, z);
+		zone_lock_wr(td, f, z);
 		pthread_mutex_lock(&f->zbd_info->mutex);
 		zbd_close_zone(td, f, nz);
 		pthread_mutex_unlock(&f->zbd_info->mutex);
@@ -930,7 +945,7 @@ static uint64_t zbd_process_swd(struct thread_data *td,
 	ze = get_zone(f, f->max_zone);
 	for (z = zb; z < ze; z++) {
 		if (z->has_wp) {
-			zone_lock(td, f, z);
+			zone_lock_wr(td, f, z);
 			wp_swd += z->wp - z->start;
 		}
 		swd += z->wp - z->start;
@@ -1116,7 +1131,7 @@ static struct fio_zone_info *zbd_convert_to_open_zone(struct thread_data *td,
 
 		z = get_zone(f, zone_idx);
 		if (z->has_wp)
-			zone_lock(td, f, z);
+			zone_lock_wr(td, f, z);
 		pthread_mutex_lock(&f->zbd_info->mutex);
 		if (z->has_wp) {
 			if (z->cond != ZBD_ZONE_COND_OFFLINE &&
@@ -1214,7 +1229,7 @@ open_other_zone:
 		assert(is_valid_offset(f, z->start));
 		if (!z->has_wp)
 			continue;
-		zone_lock(td, f, z);
+		zone_lock_wr(td, f, z);
 		if (z->open)
 			continue;
 		if (zbd_open_zone(td, f, zone_idx))
@@ -1234,7 +1249,7 @@ open_other_zone:
 
 		z = get_zone(f, zone_idx);
 
-		zone_lock(td, f, z);
+		zone_lock_wr(td, f, z);
 		if (z->wp + min_bs <= zbd_zone_capacity_end(z))
 			goto out;
 		pthread_mutex_lock(&f->zbd_info->mutex);
@@ -1312,7 +1327,7 @@ zbd_find_zone(struct thread_data *td, struct io_u *io_u,
 	for (z1 = zb + 1, z2 = zb - 1; z1 < zl || z2 >= zf; z1++, z2--) {
 		if (z1 < zl && z1->cond != ZBD_ZONE_COND_OFFLINE) {
 			if (z1->has_wp)
-				zone_lock(td, f, z1);
+				zone_lock_wr(td, f, z1);
 			if (z1->start + min_bs <= z1->wp)
 				return z1;
 			if (z1->has_wp)
@@ -1323,7 +1338,7 @@ zbd_find_zone(struct thread_data *td, struct io_u *io_u,
 		if (td_random(td) && z2 >= zf &&
 		    z2->cond != ZBD_ZONE_COND_OFFLINE) {
 			if (z2->has_wp)
-				zone_lock(td, f, z2);
+				zone_lock_wr(td, f, z2);
 			if (z2->start + min_bs <= z2->wp)
 				return z2;
 			if (z2->has_wp)
@@ -1642,10 +1657,10 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 
 	zbd_check_swd(td, f);
 
-	zone_lock(td, f, zb);
-
 	switch (io_u->ddir) {
 	case DDIR_READ:
+		zone_lock_rd(td, f, zb);
+
 		if (td->runstate == TD_VERIFYING && td_write(td)) {
 			zb = zbd_replay_write_order(td, io_u, zb);
 			goto accept;
@@ -1710,6 +1725,7 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 		assert(io_u->offset + io_u->buflen <= zb->wp);
 		goto accept;
 	case DDIR_WRITE:
+		zone_lock_wr(td, f, zb);
 		if (io_u->buflen > f->zbd_info->zone_size) {
 			td_verror(td, EINVAL, "I/O buflen exceeds zone size");
 			dprint(FD_IO,

@@ -25,7 +25,7 @@ enum io_u_action {
  * @wp: zone write pointer location (bytes)
  * @capacity: maximum size usable from the start of a zone (bytes)
  * @verify_block: number of blocks that have been verified for this zone
- * @mutex: protects the modifiable members in this structure
+ * @rwlock: protects the modifiable members in this structure
  * @type: zone type (BLK_ZONE_TYPE_*)
  * @cond: zone state (BLK_ZONE_COND_*)
  * @has_wp: whether or not this zone can have a valid write pointer
@@ -34,7 +34,7 @@ enum io_u_action {
  * @reset_zone: whether or not this zone should be reset before writing to it
  */
 struct fio_zone_info {
-	pthread_mutex_t		mutex;
+	pthread_rwlock_t	rwlock;
 	uint64_t		start;
 	uint64_t		wp;
 	uint64_t		capacity;
