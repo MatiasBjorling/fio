@@ -2509,7 +2509,7 @@ int main(void)
 EOF
 if compile_prog "" "" "blkzoned report capacity"; then
   output_sym "CONFIG_HAVE_REP_CAPACITY"
-  rep_capacity="yes"
+  rep_capacity="no"
 else
   rep_capacity="no"
 fi

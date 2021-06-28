@@ -116,10 +116,9 @@ out:
 static uint64_t zone_capacity(struct blk_zone_report *hdr,
 			      struct blk_zone *blkz)
 {
-#ifdef CONFIG_HAVE_REP_CAPACITY
 	if (hdr->flags & BLK_ZONE_REP_CAPACITY)
 		return blkz->capacity << 9;
-#endif
+
 	return blkz->len << 9;
 }
 
